@@ -1,0 +1,12 @@
+<apex:page sidebar="false" showHeader="false" standardStylesheets="false" contentType="text/cache-manifest">CACHE MANIFEST
+#ver 2
+{!URLFOR($Resource.CourseConsultant, 'css/ionic.min.css')}
+{!URLFOR($Resource.CourseConsultant, 'js/ionic.bundle.min.js')}
+{!URLFOR($Resource.CourseConsultant, 'js/jquery.min.js')}
+{!URLFOR($Resource.CourseConsultant, 'js/Linq2IndexedDB.min.js')}
+/jslibrary/1383366200000/sfdc/JiffyStubs.js 
+/jslibrary/1383366200000/sfdc/VFRemote.js
+
+NETWORK:
+*
+</apex:page>

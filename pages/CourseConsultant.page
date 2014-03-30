@@ -1,0 +1,811 @@
+<apex:page showHeader="false" sidebar="false" controller="CourseConsultantController" showChat="false" applyBodyTag="false" applyHtmlTag="false" standardStylesheets="false" cache="false" readOnly="true">
+
+<html manifest="/demoReal/CourseConsultantCache">
+    <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no, width=device-width"/>
+        <title>Digital PCP, Course Consultant User Guide</title>
+
+        <link href="{!URLFOR($Resource.CourseConsultant, 'css/ionic.min.css')}" rel="stylesheet"/>
+
+        <script src="{!URLFOR($Resource.CourseConsultant, 'js/ionic.bundle.min.js')}"></script>
+        <script src="{!URLFOR($Resource.CourseConsultant, 'js/jquery.min.js')}"></script>
+        <script src="{!URLFOR($Resource.CourseConsultant, 'js/Linq2IndexedDB.min.js')}"></script>
+
+        <script>
+            var app = angular.module('app', ['ionic']);
+            app.run(function( $window, indexedDBDataSvc, $log, $interval, http){
+                //for when the cache needs to be refreshed
+                $window.applicationCache.addEventListener('updateready', 
+                    function(){
+                        $window.applicationCache.update();
+                        $window.applicationCache.swapCache();
+                    }, 
+                false);
+                //we open the DB
+                indexedDBDataSvc.open().then(function(){
+                    //we check every 60s if there is anything to update.
+                    $interval(function() {
+                        if(navigator.onLine===true){
+                            indexedDBDataSvc.getClients2Update().then(function(records){
+                                $log.debug('got some records 2 update', records);
+                                if(records.length) {
+                                    var records2save = [];
+                                    for (var i = records.length - 1; i >= 0; i--) {
+                                        var tmp = angular.copy(records[i]);
+                                        delete tmp.Telephone__cIndexed;
+                                        delete tmp.English_Name__cIndexed;
+                                        records2save.push(tmp);
+                                    };
+                                    $log.debug('records2save', records2save);
+                                    http.saveClients(records2save).then(function(result){
+                                        if(result.success===true) {
+                                            indexedDBDataSvc.removeClients(records).then(function(nbClients){
+                                                $log.debug('record removed!', nbClients);
+                                            }, function(err){ 
+                                                $log.error(err);
+                                            });
+                                        }
+                                        else {
+                                            $log.error(result.errMsg);
+                                        }
+                                    }, function(err){
+                                        $log.error('got error', err);
+                                    });
+                                }
+                            }, function(err){
+                                $log.error('error while pulling', err);
+                            });
+                        }
+                    }, 60000);
+                });
+            });
+
+            app.config(function($stateProvider, $urlRouterProvider) {
+                $stateProvider
+                .state('signin', {
+                    url: "/sign-in",
+                    templateUrl: "sign-in.html",
+                    controller: 'SignInCtrl'
+                })
+                .state('forgotpassword', {
+                    url: "/forgot-password",
+                    templateUrl: "forgot-password.html"
+                })
+                .state('tabs', {
+                    url: "/tab",
+                    abstract: true,
+                    templateUrl: "tabs.html"
+                })
+                .state('tabs.selectClient', {
+                    url: "/selectClient",
+                    views: {
+                        'selectClient-tab': {
+                            templateUrl: "selectClient.html",
+                            controller: 'SelectClientCtrl'
+                        }
+                    }
+                })
+                .state('tabs.personalInformations', {
+                    url: "/personalInformations",
+                    views: {
+                        'selectClient-tab': {
+                            templateUrl: "personalInformations.html",
+                            controller: 'PersonalInformationsCtrl'
+                        }
+                    }
+                })
+                .state('tabs.learningBackground', {
+                    url: "/learningBackground",
+                    views: {
+                        'selectClient-tab': {
+                            templateUrl: "learningBackground.html"
+                        }
+                    }
+                })
+                .state('tabs.about', {
+                    url: "/about",
+                    views: {
+                        'about-tab': {
+                            templateUrl: "about.html"
+                        }
+                    }
+                });
+                $urlRouterProvider.otherwise("/sign-in");
+            });
+
+            app.service('http', function($q){
+                return {
+                    loginHandler: function(user) {
+                        var defer = $q.defer();
+                        CourseConsultantController.loginHandler(
+                            user.username,
+                            user.password,
+                            function(result, event) {
+                                if(event.status) {
+                                    defer.resolve(result);
+                                }
+                                else defer.reject(event.message);
+                            },
+                            {escape:false, buffer: false}
+                        );
+                        return defer.promise;
+                    },
+                    getClients: function(firstId) {
+                        var defer = $q.defer();
+                        CourseConsultantController.getClients(
+                            firstId,
+                            function(result, event) {
+                                if(event.status) {
+                                    defer.resolve(result);
+                                }
+                                else defer.reject(event.message);
+                            },
+                            {escape:false, buffer: false}
+                        );
+                        return defer.promise;
+                    },
+                    saveClients: function(clients) {
+                        var defer = $q.defer();
+                        CourseConsultantController.saveClients(
+                            clients,
+                            function(result, event) {
+                                if(event.status) {
+                                    defer.resolve(result);
+                                }
+                                else defer.reject(event.message);
+                            },
+                            {escape:false, buffer: false}
+                        );
+                        return defer.promise;
+                    }
+                }
+            });
+
+            app.factory('indexedDBDataSvc', function($window, $log, $q){
+                
+
+                var dbLinq=null,
+                    dbNative = null,
+                    configClient = {
+                        dbName: 'CourseConsultantData',
+                        version: 1,
+                        objectStoreName: 'client',
+                        appID: 123
+                    },
+                    configClient2update = {
+                        dbName: 'CourseConsultantData',
+                        version: 1,
+                        objectStoreName: 'client2update',
+                        appID: 123
+                    };
+
+                var open = function(){
+                    var deferred = $q.defer();
+                    //linq2indexeddb implementation (for querying)
+                    var databaseDefinition = [{
+                        version: configClient.version,
+                        objectStores: [{ name: configClient.objectStoreName, objectStoreOptions: {keyPath: "Id"}},
+                            { name: configClient2update.objectStoreName, objectStoreOptions: {keyPath: "Id"}}],
+                        indexes: [
+                        { objectStoreName: configClient.objectStoreName, propertyName: "Birth_Date__c", indexOptions: { unique: false}},
+                        { objectStoreName: configClient.objectStoreName, propertyName: "English_Name__cIndexed", indexOptions: { unique: false}},
+                        { objectStoreName: configClient.objectStoreName, propertyName: "Telephone__cIndexed", indexOptions: { unique: false}}]
+                    }];
+                     
+                    var dbConfig = {
+                        version: configClient.version,
+                        definition: databaseDefinition
+                    };
+                     
+                    if (!localStorage.customerRevision) {
+                        localStorage.customerRevision = -1;
+                    }
+                    
+                    dbLinq = new $window.linq2indexedDB.DbContext(configClient.dbName, dbConfig, false);
+
+                    //native implementation (for inserting)
+                    var version = configClient.version;
+                    var request = $window.indexedDB.open(configClient.dbName, version);
+                  
+                    request.onupgradeneeded = function(e) {
+                        dbNative = e.target.result;
+
+                        e.target.transaction.onerror = $window.indexedDB.onerror;
+
+                        if(dbNative.objectStoreNames.contains(configClient.objectStoreName)) {
+                            dbNative.deleteObjectStore(configClient.objectStoreName);
+                        }
+                        if(dbNative.objectStoreNames.contains(configClient2update.objectStoreName)) {
+                            dbNative.deleteObjectStore(configClient2update.objectStoreName);
+                        }
+
+                        var store = dbNative.createObjectStore(configClient.objectStoreName, {keyPath: "Id"});
+                        store.createIndex("Birth_Date__c_Index", "Birth_Date__c", { unique: false });
+                        store.createIndex("English_Name__cIndexed_Index", "English_Name__cIndexed", { unique: false });
+                        store.createIndex("Telephone__cIndexed_Index", "Telephone__cIndexed", { unique: false });
+                        
+                        var storeClient2update = dbNative.createObjectStore(configClient2update.objectStoreName, {keyPath: "Id"});
+                    };
+                  
+                    request.onsuccess = function(e) {
+                        dbNative = e.target.result;
+                        deferred.resolve();
+                    };
+                  
+                    request.onerror = function(){
+                        deferred.reject();
+                    };
+                    
+                    return deferred.promise;
+                };
+                
+                var getClients2Update = function() {
+                    var deferred = $q.defer();
+
+                    if(dbLinq === null){
+                        deferred.reject("IndexDB is not opened yet!");
+                    }
+                    else {
+                       dbLinq.from('client2update').select().then(
+                           function(result){
+                                deferred.resolve(result);
+                           }, function(args){
+                               $log.error('error in getClients2Update', args);
+                               deferred.reject(args);
+                           });
+                    }
+                    return deferred.promise;
+                };
+
+                var getClients = function(search){
+                    var deferred = $q.defer();
+
+                    if(dbLinq === null){
+                        deferred.reject("IndexDB is not opened yet!");
+                    }
+                    else{
+                        console.log('going to be searched', search);
+                        var result = [];
+                        var searchFrom = search.from?new Date(search.from).getTime():-9999999999999999999;
+                        var searchTo = search.to?new Date(search.to).getTime():9999999999999999999;
+                        var name = search.name?search.name.toLowerCase():'';
+                        var phone = search.phone?search.phone.toLowerCase():'';
+                        var transaction = dbLinq.from('client');
+                        if(name.length) {
+                            transaction = transaction.where('English_Name__cIndexed').between(name, name + '\uffff', true, true);
+                            if(phone.length) {
+                                transaction = transaction.and('Telephone__cIndexed').between(phone, phone + '\uffff', true, true);
+                            }
+                            if(search.from||search.to) {
+                                transaction = transaction.and('Birth_Date__c').between(searchFrom, searchTo, true, true);
+                            }   
+                        }
+                        else if(phone.length) {
+                            transaction = transaction.where('Telephone__cIndexed').between(phone, phone + '\uffff', true, true);
+                            if(search.from||search.to) {
+                                transaction = transaction.and('Birth_Date__c').between(searchFrom, searchTo, true, true);
+                            } 
+                        }
+                        else if(search.from||search.to) {
+                            transaction = transaction.where('Birth_Date__c').between(searchFrom, searchTo, true, true);
+                        }
+                        transaction.select().then(function(result){
+                                deferred.resolve(result);
+                            }, function(args){
+                                $log.error('error in getClients', args);
+                                deferred.reject(result);
+                            }, function(args){
+                                $log.debug('progress', args);
+                                result.push(args);
+                                if(result.length>5) {
+                                    deferred.resolve(result);
+                                    throw "stop!";
+                                }
+                            });
+                    }
+                    return deferred.promise;
+                };
+              
+                var addClients = function(clients){
+                    var deferred = $q.defer();
+                    
+                    if(dbNative === null){
+                        deferred.reject("IndexDB is not opened yet!");
+                    }
+                    else{
+                        var store = dbNative.transaction([configClient.objectStoreName], "readwrite").objectStore(configClient.objectStoreName);
+                        for(var i=0;i<clients.length;i++) {
+                            if(clients[i].English_Name__c) {
+                                clients[i].English_Name__cIndexed = clients[i].English_Name__c.toLowerCase() + 'a';
+                            }
+                            if(clients[i].Telephone__c) {
+                                clients[i].Telephone__cIndexed = clients[i].Telephone__c.toLowerCase();
+                            }
+
+                            var request = store.put(clients[i]);  
+                        }
+                    
+                        request.onsuccess = function() {
+                            deferred.resolve(clients.length);
+                        };
+                    
+                        request.onerror = function(e) {
+                            $log.error(e);
+                            deferred.reject("Client item couldn't be added!");
+                        };
+                    }
+                    return deferred.promise;
+                };
+
+                //method used for storing record which couldn't be sent to salesforce directly
+                var addClient2update = function(client){
+                    var deferred = $q.defer();
+                    
+                    if(dbNative === null){
+                        deferred.reject("IndexDB is not opened yet!");
+                    }
+                    else{
+                        var store = dbNative.transaction([configClient2update.objectStoreName], "readwrite").objectStore(configClient2update.objectStoreName);
+                        var request = store.put(client);  
+                    
+                        request.onsuccess = function() {
+                            deferred.resolve(1);
+                        };
+                    
+                        request.onerror = function(e) {
+                            $log.error(e);
+                            deferred.reject("Client item couldn't be added!");
+                        };
+                    }
+                    return deferred.promise;
+                };
+                
+                var removeClients = function(clients) {
+                    var deferred = $q.defer();
+                    
+                    if(dbNative === null){
+                        deferred.reject("IndexDB is not opened yet!");
+                    }
+                    else{
+                        var store = dbNative.transaction([configClient2update.objectStoreName], "readwrite").objectStore(configClient2update.objectStoreName);
+                        for (var i = clients.length - 1; i >= 0; i--) {
+                            var request = store.delete(clients[i].Id); 
+                        };
+                    
+                        request.onsuccess = function() {
+                            deferred.resolve(clients.length);
+                        };
+                    
+                        request.onerror = function(e) {
+                            $log.error(e);
+                            deferred.reject("Client item couldn't be removed!");
+                        };
+                    }
+                    return deferred.promise;
+                }
+
+                return {
+                    open: open,
+                    getClients2Update: getClients2Update,
+                    getClients: getClients,
+                    addClients: addClients,
+                    addClient2update: addClient2update,
+                    removeClients: removeClients
+                };
+            });
+
+            function SignInCtrl($scope, $state, $log, http) {
+                $scope.user = {};
+                $scope.loginHasError = false;
+
+                $scope.signIn = function() {
+                    $log.debug('Sign-In', $scope.user);
+                    http.loginHandler($scope.user).then(
+                        function(result){
+                            if(result===true) {
+                                $scope.loginHasError = false;
+                                $state.go('tabs.selectClient');
+                            }
+                            else {
+                                $scope.loginHasError = true;
+                                $log.error('wrong login');
+                            }
+                        },
+                        function(error) {
+                            $log.error('unknown error');
+                        });
+                };
+            }
+            
+            function SelectClientCtrl($scope, $state, $log, $rootScope, http, indexedDBDataSvc) {
+
+                console.log('clientNumbers', {!clientNumbers});
+                $scope.search = $rootScope.params&&$rootScope.params.search||{};
+                $scope.totalNumberOfClients = {!clientNumbers};
+                $scope.currentNumberUpdated = 0;
+                $scope.clientsFound = [];
+                var clientsRetrieved = 0;
+                $scope.refreshClients = function() {
+                    var getClients = function(clientId) {
+                        http.getClients(clientId).then(
+                            function(clients){
+                                clientsRetrieved += clients.length;
+                                if(clientsRetrieved<=60000) {
+                                    $log.debug('result size', clients.length);
+                                    if(clients.length===20000) {
+                                        //we only recall the function in case we have 50k clients (i.e. clients are remaining in the DB)
+                                        getClients(clients[clients.length-1].Id);
+                                    }
+                                    if(clients.length>0) {
+                                        //we have something to insert
+                                        indexedDBDataSvc.addClients(clients).then(function(nbClients){
+                                            $log.debug('record inserted!', nbClients);
+                                            $scope.currentNumberUpdated += nbClients;
+                                            if($scope.currentNumberUpdated===$scope.totalNumberOfClients) {
+                                                //we are finished, stop scroll...
+                                                $scope.$broadcast('scroll.refreshComplete');
+                                            }
+                                        }, function(err){ 
+                                            $log.error(err);
+                                        });
+                                    }
+                                }
+                                else {
+                                    $scope.$broadcast('scroll.refreshComplete');
+                                }
+                            },
+                            function(error) {
+                                $log.error('unknown error', error);
+                            });
+                    }
+                    $scope.currentNumberUpdated = 0;
+                    getClients('0'); 
+                }
+
+                $scope.searchClient = function() {
+                    console.log('$scope.search', $scope.search);
+                    indexedDBDataSvc.getClients($scope.search).then(function(clients){
+                        console.log('got clients', clients, $scope.clientsFound);
+                        //workaround for avoiding flippering (angular see the same key)
+                        for (var i = 0; i < $scope.clientsFound.length; i++) {
+                            if(clients.length>i) {
+                                clients[i].$$hashKey = $scope.clientsFound[i].$$hashKey
+                            }
+                        };
+                        //assignment
+                        $scope.clientsFound = clients;
+                    }, function(error) {
+                        console.log('unknown error', error);
+                    });
+                }
+                $scope.searchClient();
+
+                $scope.showPersonalInformations = [{
+                    text: 'Select Personal Informations',
+                    type: 'button-calm',
+                    onTap: function(client) {
+                        $rootScope.params = {client:client, search: $scope.search};
+                        $state.go('tabs.personalInformations');
+                    }
+                }];
+            }
+
+            function PersonalInformationsCtrl($scope, $rootScope, $ionicModal, http, $log, indexedDBDataSvc) {
+             //   console.log('first', item);
+                $scope.client = $rootScope.params&&$rootScope.params.client;
+                
+                console.log('seconds', $rootScope.params, $scope.client);
+
+                // Load the modal from the given template URL
+                $ionicModal.fromTemplateUrl('personalInformationsModal.html', function(modal) {
+                        $scope.modal = modal;
+                    }, {
+                        scope: $scope,
+                        animation: 'slide-in-up'
+                    });
+
+                $scope.updateModal = function() {
+                    $scope.modal.hide();
+
+                    $scope.client = angular.copy($scope.clientEdit);
+                    $scope.client.Birth_Date__c = $scope.client.Birth_Date__c&&$scope.client.Birth_Date__c.getTime();
+
+                    var client2save = angular.copy($scope.client);
+                    //cleaning for salesforce parsing.
+                    delete client2save.Telephone__cIndexed;
+                    delete client2save.English_Name__cIndexed;
+                    $log.debug('client', client2save, $scope.client);
+
+                    var handleSave = function(client, isSuccess) {
+                        indexedDBDataSvc.addClients([client]).then(function(nbClients){
+                            $log.debug('record upserted!', nbClients);
+                        }, function(err){ 
+                            $log.error(err);
+                        });
+                        if(isSuccess===false) {
+                            indexedDBDataSvc.addClient2update(client).then(function(res){
+                                $log.debug('record deferred upserted!', res);
+                            }, function(err){ 
+                                $log.error(err);
+                            });
+                        }
+                    }
+                    http.saveClients([client2save]).then(function(res){
+                        $log.debug('success save', res);
+                        if(res.success===false) {
+                            handleSave($scope.client, false);
+                        }
+                        else {
+                            handleSave($scope.client, true);
+                        }
+                    }, function(err) {
+                        $log.error('error save', err);
+                        handleSave($scope.client, false);
+                    });
+                }
+
+                $scope.closeModal = function() {
+                    $scope.modal.hide();
+                }
+
+                //cleanup the modal
+                $scope.$on('$destroy', function() {
+                    $scope.modal.remove();
+                });
+
+                $scope.rightButtons = [{
+                    type: 'button-positive',
+                    content: '<i class="icon ion-edit"></i>',
+                    tap: function(e) {
+                        $scope.clientEdit = angular.copy($scope.client);
+                        if($scope.clientEdit){
+                            $scope.clientEdit.Birth_Date__c = new Date($scope.clientEdit.Birth_Date__c);
+                        }
+                        $scope.modal.show();
+                    }
+                }];
+            }
+        </script>
+    </head>
+    <body ng-app="app">
+    
+        <ion-nav-bar animation="nav-title-slide-ios7" 
+            type="bar-positive" 
+            back-button-type="button-icon" 
+            back-button-icon="ion-arrow-left-c"></ion-nav-bar>
+                 
+        <ion-nav-view animation="slide-left-right"></ion-nav-view>
+
+        <script id="sign-in.html" type="text/ng-template">
+            <ion-view title="PERSONAL COURSE PLAN" >
+                <ion-content has-header="true">
+                    <div class="list">
+                        <div class="card" ng-show="loginHasError">
+                            <div class="item item-text-wrap" style="color:red">
+                                Invalid Password / Username
+                            </div>
+                        </div>
+                        <label class="item item-input">
+                            <span class="input-label">Employee Code</span>
+                            <input type="text" id="inputUsername" ng-model="user.username" placeholder="try with 1234"/>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Password</span>
+                            <input type="password" ng-model="user.password" placeholder="try with 1234"/>
+                        </label>
+                    </div>
+                    <div class="padding">
+                        <button class="button button-block button-positive" ng-click="signIn()">
+                            Login
+                        </button>
+                        <a class="button button-block button-dark" href="#/forgot-password">Forgot password</a>
+                    </div>
+                </ion-content>
+            </ion-view>
+        </script>
+
+        <script id="forgot-password.html" type="text/ng-template">
+            <ion-view title="Forgot Password">
+                <ion-content has-header="true" padding="true">
+                    <p>
+                        This is a demo and it has just not been implemented.
+                    </p>
+                    <a class="button button-block button-dark" href="#/sign-in">Sign-In</a>
+                </ion-content>
+            </ion-view>
+        </script>
+        
+        <script id="tabs.html" type="text/ng-template">
+            <ion-tabs tabs-style="tabs-icon-top" tabs-type="tabs-positive" animation="slide-left-right">
+
+                <ion-tab title="Select Client" icon="ion-home" href="#/tab/selectClient">
+                    <ion-nav-view name="selectClient-tab" ></ion-nav-view>
+                </ion-tab>
+
+                <ion-tab title="About" icon="ion-ios7-information" href="#/tab/about">
+                    <ion-nav-view name="about-tab"></ion-nav-view>
+                </ion-tab>
+
+                <ion-tab title="Sign-Out" icon="ion-log-out" href="#/sign-in">
+                </ion-tab>
+
+            </ion-tabs>
+        </script>
+
+        <script id="selectClient.html" type="text/ng-template">
+            <ion-view title="Select Client" >
+                <ion-content has-header="true" padding="true">
+                    <ion-refresher
+                        refreshing-text="{{currentNumberUpdated}} of {{totalNumberOfClients}} done"
+                        pulling-text="Warning! You are going to refresh all Clients..."
+                        on-refresh="refreshClients()"
+                        refreshing-icon="ion-loading-c">
+                    </ion-refresher>
+
+                    <div class="row row-center">
+                        <div class="col">
+                            <label class="item item-input">
+                                <span class="input-label">Chinese Name</span>
+                                <input type="text" ng-model="search.name" ng-keyup="searchClient()">
+                            </label>
+                            <label class="item item-input">
+                                <span class="input-label">Mobile Phone</span>
+                                <input type="text" ng-model="search.phone" ng-keyup="searchClient()">
+                            </label>
+                        </div>
+                        <div class="col">
+                            <label class="item item-input">
+                                <span class="input-label">From</span>
+                                <input type="date" ng-model="search.from" ng-keyup="searchClient()">
+                            </label>
+                            <label class="item item-input">
+                                <span class="input-label">To</span>
+                                <input type="date" ng-model="search.to" ng-keyup="searchClient()">
+                            </label>
+                        </div>
+                        <div class="col col-20" style="text-align:center">
+                            <a class="button button-positive button-block icon ion-search" ng-click="searchClient()">
+                                Search
+                            </a>
+                        </div>
+                    </div>
+                    <div class="list">
+                        <div class="item item-divider">
+                           <div class="row">
+                                <div class="col">Chinese Name</div>
+                                <div class="col">English Name</div>
+                                <div class="col">Mobile Phone</div>
+                            </div>
+                        </div>
+                        <ion-list option-buttons="showPersonalInformations">
+                            <ion-item ng-repeat="item in clientsFound" item="item" href="javascript:void()" option-buttons="showPersonalInformations">
+                                <div class="row">
+                                    <div class="col">{{item.Name}}</div>
+                                    <div class="col">{{item.English_Name__c}}</div>
+                                    <div class="col">{{item.Telephone__c}}</div>
+                                </div>
+                            </ion-item>
+                        </ion-list>
+    
+                    </div>
+                </ion-content>
+            </ion-view>
+        </script>
+
+        <script id="personalInformations.html" type="text/ng-template">
+            <ion-view title="Please confirm your personal information" right-buttons="rightButtons">
+                <ion-content has-header="true" padding="true">
+                    <div class="list">
+                        <label class="item item-input">
+                            <span class="input-label">Chinese Name</span>
+                            <span>{{client.Name}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">English Name</span>
+                            <span>{{client.English_Name__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Birth Date</span>
+                            <span>{{client.Birth_Date__c|date:'dd/MM/yyyy'}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Telephone</span>
+                            <span>{{client.Telephone__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Email</span>
+                            <span>{{client.Email__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Male - Female</span>
+                            <span>{{client.Gender__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Course Consultant Name</span>
+                            <span>{{client.Course_Consultant_Name__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Course Consultant Cell</span>
+                            <span>{{client.Course_Consultant_Cell__c}}</span>
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">WSE Center</span>
+                            <span>{{client.WSE_Center__c}}</span>
+                        </label>
+                    </div>
+                    <a class="button icon icon-right ion-chevron-right" href="#/tab/learningBackground">OK</a>
+                </ion-content>
+            </ion-view>
+        </script> 
+
+        <script id="personalInformationsModal.html" type="text/ng-template">
+            <div class="modal">
+                <header class="bar bar-header bar-positive">
+                    <h1 class="title">Edit Client</h1>
+                    <button class="button button-clear button-positive" ng-click="closeModal()" style="color:white">Cancel</button>
+                </header>
+                <ion-content has-header="true" padding="true">
+                    <div class="list">
+                        <label class="item item-input">
+                            <span class="input-label">Chinese Name</span>
+                            <input type="text" ng-model="clientEdit.Name">
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">English Name</span>
+                            <input type="text" ng-model="clientEdit.English_Name__c">
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Birth Date</span>
+                            <input type="date" ng-model="clientEdit.Birth_Date__c">
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Telephone</span>
+                            <input type="text" ng-model="clientEdit.Telephone__c">
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Email</span>
+                            <input type="text" ng-model="clientEdit.Email__c">
+                        </label>
+                        <label class="item item-input">
+                            <span class="input-label">Male - Female</span>
+                            <select ng-model="clientEdit.Gender__c">
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                            </select>
+                        </label>
+                        <button class="button button-full button-positive" ng-click="updateModal()">Update</button>
+                    </div>
+                </ion-content>
+            </div>
+        </script>
+
+        <script id="learningBackground.html" type="text/ng-template">
+            <ion-view title="Karl Wang, tell us about your English learning background:">
+                <ion-content has-header="true" padding="true">
+                    <p>Which certificates do you have?</p>
+                    <p>CET-4</p>
+                    <p>CET-6</p>
+                    <p>How many years have you studied English?</p> <input type="number" placeholder="..."/>
+                    <p>
+                        <a class="button icon ion-chevron-left" href="#/tab/personalInformations">Back</a>
+                        <a class="button icon icon-right ion-chevron-right" href="#/tab/currentEnglishLevel">Next</a>
+                        
+                    </p>
+                </ion-content>
+            </ion-view>
+        </script>
+
+        <script id="about.html" type="text/ng-template">
+            <ion-view title="About">
+                <ion-content has-header="true" padding="true">
+                    <div style="width:100%;text-align:center;">
+                       <h1>Done by Tquila</h1>
+                    </div>
+                </ion-content>
+            </ion-view>
+        </script>
+
+    </body>
+</html>
+</apex:page>
